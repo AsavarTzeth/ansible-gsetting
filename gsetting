@@ -1,0 +1,230 @@
+#!/usr/bin/python
+# -*- coding: utf-8 -*-
+
+# Copyright (c) 2017, Patrik Nilsson
+# All rights reserved.
+#
+# This derivative work is sublicensed under the following conditions.
+#
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions
+# are met:
+#
+# 1. Redistributions of source code must retain the above copyright
+#    notice, this list of conditions and the following disclaimer.
+#
+# 2. Redistributions in binary form must reproduce the above copyright
+#    notice, this list of conditions and the following disclaimer in
+#    the documentation and/or other materials provided with the
+#    distribution.
+#
+# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+# "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+# LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+# A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+# HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+# SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+# LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+# DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+# THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+# (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+# OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+DOCUMENTATION = '''
+---
+module: gsetting
+short_description: Configure modern GNOME applications
+description:
+    - Set values of keys in a dconf database, using the gsettings
+      tool. This is useful for configuring many gtk applications.
+version_added: "2.2.1"
+author: "Patrik Nilsson (@AsavarTzeth)"
+requirements:
+    - dbus
+    - gsettings
+options:
+    key:
+        description:
+            - The key is a GSettings SCHEMA and KEY combined into a
+              single uri. See the examples to get an idea.
+        required: true
+    value:
+        description:
+            - The type of value depends on the key. Be especially
+              mindful of string values which must include explicit
+              qoutes: "'foo'".
+        required: true
+    state:
+        description:
+            - The action to take with the key/value pair. If set to
+              absent, it will reset the key to its default value.
+        default: present
+        choices:
+            - present
+            - absent
+'''
+
+EXAMPLES = '''
+# Double qoute strings to preserve the single qoutes
+- gsetting:
+    key: org.gnome.nautilus.preferences.default-folder-viewer
+    value: "'list-view'"
+
+# Get current value of a key without making any changes
+- gsetting:
+    key: org.gnome.nautilus.preferences.default-folder-viewer
+    state: get
+
+# Reset key to its default value
+- gsetting:
+    key: org.gnome.nautilus.preferences.default-folder-viewer
+    state: absent
+
+# Set the value of a key for different user
+- gsetting:
+    key: org.gnome.desktop.wm.preferences.audible-bell
+    value: "false"
+  become: true
+  become_user: "{{ username }}"
+
+# Set a list type value of a key
+- gsetting:
+    key: org.gnome.nautilus.list-view.default-visible-columns
+    value: "['name','size','type','date_modified']"
+
+# Set a null value list
+- gsetting:
+    key: org.gnome.desktop.wm.keybindings.panel-main-menu
+    value: "@as []"
+
+# Set a list of tuples
+- gsetting:
+    key: org.gnome.desktop.input-sources.sources
+    value: "[('xkb','se'),('xkb','us')]"
+
+# Set a 32 bit integer
+- gsetting:
+    key: org.gnome.desktop.interface.scaling-factor
+    value: "uint32 2"
+'''
+
+RETURN = '''
+key:
+    description: key passed to gsettings
+    returned: success
+    type: string
+    sample: org.gnome.desktop.wm.preferences.audible-bell
+current_value:
+    description: current value
+    returned: on state=get
+    type: string
+    sample: false
+new_value:
+    description: value after any changes
+    returned: changed
+    type: string
+    sample: true
+previous_value:
+    description: value before any changes
+    returned: changed
+    type: string
+    sample: false
+'''
+
+from ansible.module_utils.basic import AnsibleModule
+
+def _split_key(full_key):
+    key_list = full_key.split('.')
+    schema = '.'.join(key_list[:-1])
+    key = key_list[-1]
+    return (schema, key)
+
+def _get_command(module):
+    cmd = ([module.get_bin_path('dbus-run-session', required=False),
+            module.get_bin_path('gsettings', required=True)])
+    return cmd
+
+def _run_command(module, cmd, args):
+    return module.run_command(cmd + args)
+
+def _get_value(module, cmd, full_key):
+    schema, key = _split_key(full_key)
+    args = ['get', schema, key]
+    (rc, out, err) = _run_command(module, cmd, args)
+
+    if rc == 0:
+        return out
+    else:
+        module.fail_json(msg=err[:-1], rc=rc)
+
+def _set_value(module, cmd, full_key, value):
+    schema, key = _split_key(full_key)
+    args = ['set', schema, key, value]
+    (rc, out, err) = _run_command(module, cmd, args)
+
+    if rc == 0:
+        return out
+    else:
+        module.fail_json(msg="Failed to set value: %s" % value, rc=rc)
+
+def _reset_value(module, cmd, full_key):
+    schema, single_key = _split_key(full_key)
+    args = ['reset', schema, single_key]
+    (rc, out, err) = _run_command(module, cmd, args)
+
+    if rc == 0:
+        return out
+    else:
+        module.fail_json(msg=err[:-1], rc=rc)
+
+def main():
+    module = AnsibleModule(
+        argument_spec = dict(
+            key   = dict(required=True, type='str'),
+            value = dict(type='str'),
+            state = dict(
+                default='present',
+                choices=['present', 'absent', 'get'],
+                type='str'
+            ),
+        ),
+        supports_check_mode = True
+    )
+
+    params = module.params
+    key = module.params['key']
+    value = module.params['value']
+
+    result = {'changed': False}
+
+    # Get full paths for all commands
+    cmd = _get_command(module)
+
+    # Reset value to default on state=absent
+    if params['state'] == 'absent':
+        if not module.check_mode:
+            _reset_value(module, cmd, key)
+        result['changed'] = True
+        module.exit_json(**result)
+
+    # Get the previous value
+    pre_value = _get_value(module, cmd, key)[:-1]
+    if params['state'] == 'get':
+        result['current_value'] = pre_value
+        module.exit_json(**result)
+
+    # Ensure value is set for all state=present operations
+    if params['state'] == 'present' and not value:
+        module.fail_json(msg='state=present requires "value" to be set')
+    # Set the new value if the current value does not match
+    if pre_value != value:
+        if not module.check_mode:
+            _set_value(module, cmd, key, value)
+        result['changed'] = True
+        result['new_value'] = value
+        result['previous_value'] = pre_value
+
+    module.exit_json(**result)
+
+if __name__ == '__main__':
+    main()
