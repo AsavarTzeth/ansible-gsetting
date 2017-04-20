@@ -139,13 +139,35 @@ def _split_key(full_key):
     key = key_list[-1]
     return (schema, key)
 
+def _set_compat_args(cmd, args):
+    cmd = list(cmd)
+    cmd[4:4] = args
+    # A string is required with use_unsafe_shell=True
+    cmd = ' '.join(cmd)
+    return cmd
+
+def _get_command_compat(module, gsettings_path):
+    dbus_path = module.get_bin_path('dbus-launch', required=True)
+    kill_path = module.get_bin_path('kill', required=True)
+    cmd = (['export', ('`' + dbus_path + '`'), ';', gsettings_path,
+            ';', kill_path, '$DBUS_SESSION_BUS_PID > /dev/null 2>&1'])
+    return cmd
+
 def _get_command(module):
     cmd = ([module.get_bin_path('dbus-run-session', required=False),
             module.get_bin_path('gsettings', required=True)])
+    # Backwards compatibility with systems using dbus < 1.8.0
+    if cmd[0] is None:
+        cmd = _get_command_compat(module, cmd[1])
     return cmd
 
 def _run_command(module, cmd, args):
-    return module.run_command(cmd + args)
+    if len(cmd) > 2:
+        # Backwards compatibility with systems using dbus < 1.8.0
+        cmd = _set_compat_args(cmd, args)
+        return module.run_command(cmd, use_unsafe_shell=True)
+    else:
+        return module.run_command(cmd + args)
 
 def _get_value(module, cmd, full_key):
     schema, key = _split_key(full_key)
